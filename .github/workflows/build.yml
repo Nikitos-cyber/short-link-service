@@ -1,0 +1,81 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  JAVA_VERSION: '25'
+
+jobs:
+  # 1. Сборка + проверка, что WAR собран правильно (тест сборки)
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up JDK
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+          cache: maven
+
+      - name: Build and unit tests
+        run: mvn -B clean package
+
+      - name: Verify build output
+        run: |
+          WAR=$(ls target/*.war | head -n 1)
+          echo "WAR: $WAR ($(du -h "$WAR" | cut -f1))"
+          test -s "$WAR" || { echo "::error::WAR пустой"; exit 1; }
+
+          LIST=$(unzip -Z1 "$WAR")
+          fail=0
+          for f in \
+            "WEB-INF/classes/application.properties" \
+            "WEB-INF/classes/ru/shortLinkService/controller/CommonController.class" \
+            "WEB-INF/classes/ru/shortLinkService/service/LinkService.class" \
+            "WEB-INF/views/main-page.jsp"; do
+            if grep -qx "$f" <<< "$LIST"; then
+              echo "OK    $f"
+            else
+              echo "::error::В WAR нет файла $f"
+              fail=1
+            fi
+          done
+
+          if ! grep -qi 'WEB-INF/lib/.*jstl' <<< "$LIST"; then
+            echo "::warning::В WEB-INF/lib не найден JSTL: страницы с c:forEach и c:if могут не открыться"
+          fi
+          exit $fail
+
+      - name: Upload WAR
+        uses: actions/upload-artifact@v4
+        with:
+          name: short-link-service-war
+          path: target/*.war
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download WAR
+        uses: actions/download-artifact@v4
+        with:
+          name: short-link-service-war
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: '*.war'
+          generate_release_notes: true
